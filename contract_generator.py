@@ -9,6 +9,7 @@ import re
 import sys
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 
 # 依赖包配置: {导入名: (pip包名, 用途说明)}
@@ -56,7 +57,7 @@ def check_dependencies():
     return len(missing) == 0, missing
 
 
-def select_pip_mirror() -> tuple[str, str | None]:
+def select_pip_mirror() -> tuple[str, Optional[str]]:
     """
     让用户选择pip镜像源
 
@@ -90,7 +91,7 @@ def select_pip_mirror() -> tuple[str, str | None]:
             print("请输入有效的数字")
 
 
-def install_dependencies(packages: list, mirror_url: str | None = None) -> bool:
+def install_dependencies(packages: list, mirror_url: Optional[str] = None) -> bool:
     """
     安装缺失的依赖包
 
@@ -198,6 +199,9 @@ if not ensure_dependencies():
 # 依赖检查通过后再导入
 from openpyxl import load_workbook
 from docx import Document
+from docx.shared import Pt, Cm
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 
 
 def read_excel_data(excel_path: str) -> list[dict]:
@@ -287,7 +291,127 @@ def replace_placeholders_in_table(table, data: dict):
                 replace_placeholders_in_paragraph(paragraph, data)
 
 
-def generate_contract(template_path: str, data: dict, output_path: str):
+def find_detail_excel(data_dir: str, data: dict) -> Optional[str]:
+    """
+    查找对应的明细Excel文件
+
+    Args:
+        data_dir: 数据目录路径
+        data: 合同数据字典
+
+    Returns:
+        Excel文件路径，未找到返回None
+    """
+    contract_no = data.get("合同号", "").strip()
+    customer_name = data.get("客户名称", "").strip()
+    bu_name = data.get("BU名称", "").strip()
+
+    if not all([contract_no, customer_name, bu_name]):
+        return None
+
+    # 尝试多种可能的文件名格式
+    possible_names = [
+        f"{contract_no}{customer_name}{bu_name}.xlsx",
+        f"{contract_no}+{customer_name}+{bu_name}.xlsx",
+        f"{contract_no}-{customer_name}-{bu_name}.xlsx",
+        f"{contract_no}_{customer_name}_{bu_name}.xlsx",
+    ]
+
+    data_path = Path(data_dir)
+    for name in possible_names:
+        file_path = data_path / name
+        if file_path.exists():
+            return str(file_path)
+
+    return None
+
+
+def read_excel_table_from_row(excel_path: str, start_row: int = 9) -> list[list[str]]:
+    """
+    读取Excel文件指定行之后的表格数据
+
+    Args:
+        excel_path: Excel文件路径
+        start_row: 起始行号（从1开始计数，读取该行及之后的数据）
+
+    Returns:
+        表格数据，二维列表
+    """
+    wb = load_workbook(excel_path, read_only=True)
+    ws = wb.active
+
+    table_data = []
+    for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+        if row_idx >= start_row:
+            # 跳过完全空的行
+            if any(cell is not None for cell in row):
+                row_data = [str(cell) if cell is not None else "" for cell in row]
+                table_data.append(row_data)
+
+    wb.close()
+    return table_data
+
+
+def set_cell_border(cell):
+    """为单元格设置边框"""
+    tc = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+
+    tcBorders = OxmlElement('w:tcBorders')
+    for border_name in ['top', 'left', 'bottom', 'right']:
+        border = OxmlElement(f'w:{border_name}')
+        border.set(qn('w:val'), 'single')
+        border.set(qn('w:sz'), '4')
+        border.set(qn('w:color'), '000000')
+        tcBorders.append(border)
+    tcPr.append(tcBorders)
+
+
+def append_table_to_doc(doc, table_data: list[list[str]], title: str = None):
+    """
+    将表格数据追加到Word文档末尾
+
+    Args:
+        doc: Word文档对象
+        table_data: 表格数据，二维列表
+        title: 可选的表格标题
+    """
+    if not table_data:
+        return
+
+    # 添加空行
+    doc.add_paragraph()
+
+    # 添加标题（如果有）
+    if title:
+        title_para = doc.add_paragraph()
+        title_run = title_para.add_run(title)
+        title_run.bold = True
+        title_run.font.size = Pt(12)
+
+    # 计算列数（取最大列数）
+    max_cols = max(len(row) for row in table_data)
+
+    # 创建表格
+    table = doc.add_table(rows=len(table_data), cols=max_cols)
+    table.style = 'Table Grid'
+
+    # 填充数据
+    for row_idx, row_data in enumerate(table_data):
+        row = table.rows[row_idx]
+        for col_idx, cell_value in enumerate(row_data):
+            if col_idx < max_cols:
+                cell = row.cells[col_idx]
+                cell.text = cell_value
+                # 设置边框
+                set_cell_border(cell)
+                # 设置字体
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        run.font.size = Pt(10)
+
+
+def generate_contract(template_path: str, data: dict, output_path: str, data_dir: str = None):
     """
     根据模板生成单个合同文件
 
@@ -295,6 +419,7 @@ def generate_contract(template_path: str, data: dict, output_path: str):
         template_path: Word模板路径
         data: 合同数据字典
         output_path: 输出文件路径
+        data_dir: 数据目录路径，用于查找明细Excel文件
     """
     doc = Document(template_path)
 
@@ -320,6 +445,14 @@ def generate_contract(template_path: str, data: dict, output_path: str):
                 replace_placeholders_in_paragraph(paragraph, data)
             for table in section.footer.tables:
                 replace_placeholders_in_table(table, data)
+
+    # 查找并追加明细表格
+    if data_dir:
+        detail_excel = find_detail_excel(data_dir, data)
+        if detail_excel:
+            table_data = read_excel_table_from_row(detail_excel, start_row=9)
+            if table_data:
+                append_table_to_doc(doc, table_data, title="明细清单")
 
     doc.save(output_path)
 
@@ -360,7 +493,8 @@ def generate_output_filename(data: dict) -> str:
 def batch_generate_contracts(
     excel_path: str,
     template_path: str,
-    output_dir: str
+    output_dir: str,
+    data_dir: str = None
 ) -> tuple[int, int, list[str]]:
     """
     批量生成合同文件
@@ -369,6 +503,7 @@ def batch_generate_contracts(
         excel_path: Excel文件路径
         template_path: Word模板路径
         output_dir: 输出目录路径
+        data_dir: 数据目录路径，用于查找明细Excel文件
 
     Returns:
         (成功数量, 失败数量, 错误信息列表)
@@ -376,6 +511,10 @@ def batch_generate_contracts(
     # 确保输出目录存在
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+
+    # 如果未指定data_dir，使用excel_path所在目录
+    if data_dir is None:
+        data_dir = str(Path(excel_path).parent)
 
     # 读取Excel数据
     contracts = read_excel_data(excel_path)
@@ -391,9 +530,11 @@ def batch_generate_contracts(
         try:
             filename = generate_output_filename(contract)
             output_file = output_path / filename
-            generate_contract(template_path, contract, str(output_file))
+            generate_contract(template_path, contract, str(output_file), data_dir)
             success_count += 1
-            print(f"[{i}/{len(contracts)}] 生成成功: {filename}")
+            detail_excel = find_detail_excel(data_dir, contract)
+            detail_info = " (含明细表格)" if detail_excel else ""
+            print(f"[{i}/{len(contracts)}] 生成成功: {filename}{detail_info}")
         except Exception as e:
             fail_count += 1
             error_msg = f"第{i}条记录生成失败: {e}"
