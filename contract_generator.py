@@ -204,12 +204,13 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
 
-def read_excel_data(excel_path: str) -> list[dict]:
+def read_excel_data(excel_path: str, header_row: int = 1) -> list[dict]:
     """
     读取Excel文件，返回合同数据列表
 
     Args:
         excel_path: Excel文件路径
+        header_row: 表头所在行号（从1开始计数，默认为1）
 
     Returns:
         合同数据列表，每条数据为字典格式
@@ -218,15 +219,16 @@ def read_excel_data(excel_path: str) -> list[dict]:
     ws = wb.active
 
     rows = list(ws.iter_rows(values_only=True))
-    if not rows:
+    if not rows or len(rows) < header_row:
         return []
 
-    # 第一行作为表头
-    headers = [str(h).strip() if h else f"Column_{i}" for i, h in enumerate(rows[0])]
+    # 指定行作为表头（转换为0索引）
+    header_idx = header_row - 1
+    headers = [str(h).strip() if h else f"Column_{i}" for i, h in enumerate(rows[header_idx])]
 
-    # 后续行作为数据
+    # 表头之后的行作为数据
     data = []
-    for row in rows[1:]:
+    for row in rows[header_idx + 1:]:
         # 跳过空行
         if not any(row):
             continue
@@ -293,7 +295,7 @@ def replace_placeholders_in_table(table, data: dict):
 
 def find_detail_excel(data_dir: str, data: dict) -> Optional[str]:
     """
-    查找对应的明细Excel文件
+    查找对应的明细Excel文件（单文件模式）
 
     Args:
         data_dir: 数据目录路径
@@ -326,19 +328,72 @@ def find_detail_excel(data_dir: str, data: dict) -> Optional[str]:
     return None
 
 
-def read_excel_table_from_row(excel_path: str, start_row: int = 9) -> list[list[str]]:
+def find_detail_sheet(detail_excel_path: str, data: dict,
+                      customer_field: str = "收货方名称（乙方）",
+                      contract_field: str = "合同编号") -> Optional[str]:
+    """
+    在明细Excel文件中查找对应的工作表（多工作表模式）
+
+    Args:
+        detail_excel_path: 明细Excel文件路径
+        data: 合同数据字典
+        customer_field: 客户名称字段名
+        contract_field: 合同编号字段名
+
+    Returns:
+        工作表名称，未找到返回None
+    """
+    customer = data.get(customer_field, "").strip()
+    contract_no = data.get(contract_field, "").strip()
+
+    if not customer or not contract_no:
+        return None
+
+    target_key = f"{customer}{contract_no}"
+
+    try:
+        wb = load_workbook(detail_excel_path, read_only=True)
+
+        # 遍历所有工作表，查找key匹配的
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            # 读取第一行的key值（通常在B1单元格）
+            first_row = list(ws.iter_rows(max_row=1, values_only=True))
+            if first_row and first_row[0]:
+                row_values = first_row[0]
+                # key可能在第2列（索引1）
+                if len(row_values) > 1 and row_values[1]:
+                    sheet_key = str(row_values[1]).strip()
+                    if sheet_key == target_key:
+                        wb.close()
+                        return sheet_name
+
+        wb.close()
+    except Exception:
+        pass
+
+    return None
+
+
+def read_excel_table_from_row(excel_path: str, start_row: int = 9,
+                               sheet_name: Optional[str] = None) -> list[list[str]]:
     """
     读取Excel文件指定行之后的表格数据
 
     Args:
         excel_path: Excel文件路径
         start_row: 起始行号（从1开始计数，读取该行及之后的数据）
+        sheet_name: 工作表名称，None表示使用活动工作表
 
     Returns:
         表格数据，二维列表
     """
     wb = load_workbook(excel_path, read_only=True)
-    ws = wb.active
+
+    if sheet_name:
+        ws = wb[sheet_name]
+    else:
+        ws = wb.active
 
     table_data = []
     for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
@@ -411,7 +466,10 @@ def append_table_to_doc(doc, table_data: list[list[str]], title: str = None):
                         run.font.size = Pt(10)
 
 
-def generate_contract(template_path: str, data: dict, output_path: str, data_dir: str = None):
+def generate_contract(template_path: str, data: dict, output_path: str,
+                      data_dir: Optional[str] = None,
+                      detail_excel_path: Optional[str] = None,
+                      detail_start_row: int = 4):
     """
     根据模板生成单个合同文件
 
@@ -419,7 +477,9 @@ def generate_contract(template_path: str, data: dict, output_path: str, data_dir
         template_path: Word模板路径
         data: 合同数据字典
         output_path: 输出文件路径
-        data_dir: 数据目录路径，用于查找明细Excel文件
+        data_dir: 数据目录路径，用于查找明细Excel文件（单文件模式）
+        detail_excel_path: 明细Excel文件路径（多工作表模式）
+        detail_start_row: 明细数据起始行号（默认4）
     """
     doc = Document(template_path)
 
@@ -447,14 +507,28 @@ def generate_contract(template_path: str, data: dict, output_path: str, data_dir
                 replace_placeholders_in_table(table, data)
 
     # 查找并追加明细表格
-    if data_dir:
+    detail_found = False
+
+    # 模式1: 多工作表模式（明细在一个Excel文件的多个工作表中）
+    if detail_excel_path and Path(detail_excel_path).exists():
+        sheet_name = find_detail_sheet(detail_excel_path, data)
+        if sheet_name:
+            table_data = read_excel_table_from_row(detail_excel_path, detail_start_row, sheet_name)
+            if table_data:
+                append_table_to_doc(doc, table_data, title="合同配置清单")
+                detail_found = True
+
+    # 模式2: 单文件模式（每个合同对应一个明细Excel文件）
+    if not detail_found and data_dir:
         detail_excel = find_detail_excel(data_dir, data)
         if detail_excel:
             table_data = read_excel_table_from_row(detail_excel, start_row=9)
             if table_data:
-                append_table_to_doc(doc, table_data, title="明细清单")
+                append_table_to_doc(doc, table_data, title="合同配置清单")
+                detail_found = True
 
     doc.save(output_path)
+    return detail_found
 
 
 def sanitize_filename(name: str) -> str:
@@ -472,19 +546,29 @@ def sanitize_filename(name: str) -> str:
     return re.sub(illegal_chars, "_", name)
 
 
-def generate_output_filename(data: dict) -> str:
+def generate_output_filename(data: dict,
+                             contract_field: str = "合同编号",
+                             customer_field: str = "收货方名称（乙方）",
+                             bu_field: str = "BU") -> str:
     """
     根据合同数据生成输出文件名
 
     Args:
         data: 合同数据字典
+        contract_field: 合同编号字段名
+        customer_field: 客户名称字段名
+        bu_field: BU字段名
 
     Returns:
         输出文件名（不含路径）
     """
-    contract_no = data.get("合同号", "").strip() or "未知合同号"
-    customer_name = data.get("客户名称", "").strip() or "未知客户"
-    bu_name = data.get("BU名称", "").strip() or "未知BU"
+    # 尝试多种可能的字段名
+    contract_no = (data.get(contract_field, "").strip() or
+                   data.get("合同号", "").strip() or "未知合同号")
+    customer_name = (data.get(customer_field, "").strip() or
+                     data.get("客户名称", "").strip() or "未知客户")
+    bu_name = (data.get(bu_field, "").strip() or
+               data.get("BU名称", "").strip() or "未知BU")
 
     filename = f"{contract_no}-{customer_name}-{bu_name}.docx"
     return sanitize_filename(filename)
@@ -494,7 +578,10 @@ def batch_generate_contracts(
     excel_path: str,
     template_path: str,
     output_dir: str,
-    data_dir: str = None
+    data_dir: Optional[str] = None,
+    detail_excel_path: Optional[str] = None,
+    header_row: int = 1,
+    detail_start_row: int = 4
 ) -> tuple[int, int, list[str]]:
     """
     批量生成合同文件
@@ -503,7 +590,10 @@ def batch_generate_contracts(
         excel_path: Excel文件路径
         template_path: Word模板路径
         output_dir: 输出目录路径
-        data_dir: 数据目录路径，用于查找明细Excel文件
+        data_dir: 数据目录路径，用于查找明细Excel文件（单文件模式）
+        detail_excel_path: 明细Excel文件路径（多工作表模式）
+        header_row: 数据Excel表头所在行号（默认1）
+        detail_start_row: 明细数据起始行号（默认4）
 
     Returns:
         (成功数量, 失败数量, 错误信息列表)
@@ -517,7 +607,7 @@ def batch_generate_contracts(
         data_dir = str(Path(excel_path).parent)
 
     # 读取Excel数据
-    contracts = read_excel_data(excel_path)
+    contracts = read_excel_data(excel_path, header_row=header_row)
 
     if not contracts:
         return 0, 0, ["Excel文件中没有数据"]
@@ -530,10 +620,14 @@ def batch_generate_contracts(
         try:
             filename = generate_output_filename(contract)
             output_file = output_path / filename
-            generate_contract(template_path, contract, str(output_file), data_dir)
+            detail_found = generate_contract(
+                template_path, contract, str(output_file),
+                data_dir=data_dir,
+                detail_excel_path=detail_excel_path,
+                detail_start_row=detail_start_row
+            )
             success_count += 1
-            detail_excel = find_detail_excel(data_dir, contract)
-            detail_info = " (含明细表格)" if detail_excel else ""
+            detail_info = " (含明细表格)" if detail_found else ""
             print(f"[{i}/{len(contracts)}] 生成成功: {filename}{detail_info}")
         except Exception as e:
             fail_count += 1
@@ -582,6 +676,23 @@ def main():
         help="输出目录路径 (默认: output/)"
     )
     parser.add_argument(
+        "--detail", "-d",
+        default=None,
+        help="明细Excel文件路径（多工作表模式）"
+    )
+    parser.add_argument(
+        "--header-row",
+        type=int,
+        default=1,
+        help="数据Excel表头所在行号 (默认: 1)"
+    )
+    parser.add_argument(
+        "--detail-start-row",
+        type=int,
+        default=4,
+        help="明细数据起始行号 (默认: 4)"
+    )
+    parser.add_argument(
         "--check", "-c",
         action="store_true",
         help="仅检查环境和依赖，不执行生成"
@@ -609,12 +720,19 @@ def main():
     print(f"Excel文件: {args.excel}")
     print(f"模板文件: {args.template}")
     print(f"输出目录: {args.output}")
+    if args.detail:
+        print(f"明细文件: {args.detail}")
+    print(f"表头行号: {args.header_row}")
+    print(f"明细起始行: {args.detail_start_row}")
     print("-" * 50)
 
     success, fail, errors = batch_generate_contracts(
         args.excel,
         args.template,
-        args.output
+        args.output,
+        detail_excel_path=args.detail,
+        header_row=args.header_row,
+        detail_start_row=args.detail_start_row
     )
 
     print("-" * 50)
