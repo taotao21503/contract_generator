@@ -16,6 +16,9 @@ from typing import Optional
 REQUIRED_PACKAGES = {
     "openpyxl": ("openpyxl", "读取Excel文件"),
     "docx": ("python-docx", "读写Word文档"),
+    "pandas": ("pandas", "数据处理"),
+    "matplotlib": ("matplotlib", "生成表格图片"),
+    "PIL": ("Pillow", "图片处理"),
 }
 
 # PyPI镜像源配置: (名称, URL)
@@ -199,9 +202,17 @@ if not ensure_dependencies():
 # 依赖检查通过后再导入
 from openpyxl import load_workbook
 from docx import Document
-from docx.shared import Pt, Cm
+from docx.shared import Pt, Cm, Inches
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Agg')  # 非交互式后端
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Heiti TC', 'Arial Unicode MS', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
+import tempfile
+import os
 
 
 def read_excel_data(excel_path: str, header_row: int = 1) -> list[dict]:
@@ -407,6 +418,187 @@ def read_excel_table_from_row(excel_path: str, start_row: int = 9,
     return table_data
 
 
+def table_to_image(table_data: list[list[str]], output_path: str) -> bool:
+    """
+    将表格数据转换为图片
+
+    Args:
+        table_data: 表格数据，二维列表
+        output_path: 输出图片路径
+
+    Returns:
+        是否成功生成图片
+    """
+    if not table_data:
+        return False
+
+    try:
+        # 计算有效列数（去除尾部空列）
+        max_cols = max(len(row) for row in table_data)
+        while max_cols > 1:
+            all_empty = all(
+                len(row) < max_cols or not str(row[max_cols - 1]).strip()
+                for row in table_data
+            )
+            if all_empty:
+                max_cols -= 1
+            else:
+                break
+
+        # 规范化数据
+        normalized_data = []
+        for row in table_data:
+            new_row = []
+            for i in range(max_cols):
+                if i < len(row):
+                    val = str(row[i]).replace('\n', ' ').strip()
+                else:
+                    val = ''
+                new_row.append(val)
+            normalized_data.append(new_row)
+
+        # 分离表头和数据
+        headers = normalized_data[0] if normalized_data else []
+        data_rows = normalized_data[1:] if len(normalized_data) > 1 else []
+
+        # 创建DataFrame
+        df = pd.DataFrame(data_rows, columns=headers)
+
+        # 计算图片尺寸
+        n_rows, n_cols = len(data_rows) + 1, len(headers)
+        cell_height = 0.4
+        cell_width = 1.5
+        fig_width = max(n_cols * cell_width, 10)
+        fig_height = max(n_rows * cell_height, 2)
+
+        # 创建图形
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+        ax.axis('off')
+        ax.axis('tight')
+
+        # 创建表格
+        table = ax.table(
+            cellText=df.values,
+            colLabels=df.columns,
+            cellLoc='center',
+            loc='center',
+            colColours=['#D9E2F3'] * n_cols  # 表头背景色
+        )
+
+        # 设置表格样式
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1.2, 1.5)
+
+        # 设置表头样式
+        for j in range(n_cols):
+            cell = table[(0, j)]
+            cell.set_text_props(weight='bold', fontsize=10)
+            cell.set_facecolor('#D9E2F3')
+
+        # 设置数据行样式（交替背景色）
+        for i in range(1, n_rows):
+            for j in range(n_cols):
+                cell = table[(i, j)]
+                if i % 2 == 0:
+                    cell.set_facecolor('#F5F5F5')
+                else:
+                    cell.set_facecolor('#FFFFFF')
+
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight',
+                    facecolor='white', edgecolor='none')
+        plt.close(fig)
+        return True
+
+    except Exception as e:
+        print(f"    警告: 生成表格图片失败: {e}")
+        return False
+
+
+def append_image_to_doc(doc, image_path: str, title: str = None):
+    """
+    将图片追加到Word文档末尾
+
+    Args:
+        doc: Word文档对象
+        image_path: 图片文件路径
+        title: 可选的标题
+    """
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    # 添加空行
+    doc.add_paragraph()
+
+    # 添加标题
+    if title:
+        title_para = doc.add_paragraph()
+        title_run = title_para.add_run(title)
+        title_run.bold = True
+        title_run.font.size = Pt(14)
+        title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # 添加图片
+    para = doc.add_paragraph()
+    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = para.add_run()
+    run.add_picture(image_path, width=Inches(6.5))
+
+
+def convert_to_pdf(docx_path: str, output_dir: str = None) -> Optional[str]:
+    """
+    将Word文档转换为PDF
+
+    Args:
+        docx_path: Word文档路径
+        output_dir: 输出目录，默认与Word文档同目录
+
+    Returns:
+        PDF文件路径，失败返回None
+    """
+    docx_path = Path(docx_path)
+    if output_dir:
+        pdf_path = Path(output_dir) / (docx_path.stem + '.pdf')
+    else:
+        pdf_path = docx_path.with_suffix('.pdf')
+
+    # 尝试使用 LibreOffice 转换（跨平台）
+    libreoffice_paths = [
+        'libreoffice',  # Linux
+        'soffice',  # Linux alternative
+        '/Applications/LibreOffice.app/Contents/MacOS/soffice',  # macOS
+        '/usr/bin/libreoffice',
+        'C:\\Program Files\\LibreOffice\\program\\soffice.exe',  # Windows
+    ]
+
+    for lo_path in libreoffice_paths:
+        try:
+            output_dir_str = str(pdf_path.parent)
+            result = subprocess.run(
+                [lo_path, '--headless', '--convert-to', 'pdf',
+                 '--outdir', output_dir_str, str(docx_path)],
+                capture_output=True,
+                timeout=60
+            )
+            if result.returncode == 0 and pdf_path.exists():
+                return str(pdf_path)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+
+    # 尝试使用 docx2pdf（Windows，需要安装Word）
+    try:
+        from docx2pdf import convert
+        convert(str(docx_path), str(pdf_path))
+        if pdf_path.exists():
+            return str(pdf_path)
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    return None
+
+
 def set_cell_border(cell, border_color: str = "000000", border_size: str = "4"):
     """为单元格设置边框"""
     tc = cell._tc
@@ -549,7 +741,9 @@ def append_table_to_doc(doc, table_data: list[list[str]], title: str = None):
 def generate_contract(template_path: str, data: dict, output_path: str,
                       data_dir: Optional[str] = None,
                       detail_excel_path: Optional[str] = None,
-                      detail_start_row: int = 4):
+                      detail_start_row: int = 4,
+                      use_image: bool = False,
+                      generate_pdf: bool = False):
     """
     根据模板生成单个合同文件
 
@@ -560,6 +754,8 @@ def generate_contract(template_path: str, data: dict, output_path: str,
         data_dir: 数据目录路径，用于查找明细Excel文件（单文件模式）
         detail_excel_path: 明细Excel文件路径（多工作表模式）
         detail_start_row: 明细数据起始行号（默认4）
+        use_image: 是否使用图片方式插入明细表格
+        generate_pdf: 是否同时生成PDF文件
     """
     doc = Document(template_path)
 
@@ -588,27 +784,50 @@ def generate_contract(template_path: str, data: dict, output_path: str,
 
     # 查找并追加明细表格
     detail_found = False
+    table_data = None
 
     # 模式1: 多工作表模式（明细在一个Excel文件的多个工作表中）
     if detail_excel_path and Path(detail_excel_path).exists():
         sheet_name = find_detail_sheet(detail_excel_path, data)
         if sheet_name:
             table_data = read_excel_table_from_row(detail_excel_path, detail_start_row, sheet_name)
-            if table_data:
-                append_table_to_doc(doc, table_data, title="合同配置清单")
-                detail_found = True
 
     # 模式2: 单文件模式（每个合同对应一个明细Excel文件）
-    if not detail_found and data_dir:
+    if not table_data and data_dir:
         detail_excel = find_detail_excel(data_dir, data)
         if detail_excel:
             table_data = read_excel_table_from_row(detail_excel, start_row=9)
-            if table_data:
-                append_table_to_doc(doc, table_data, title="合同配置清单")
-                detail_found = True
+
+    # 插入明细表格
+    if table_data:
+        if use_image:
+            # 使用图片方式插入
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                tmp_path = tmp.name
+            try:
+                if table_to_image(table_data, tmp_path):
+                    append_image_to_doc(doc, tmp_path, title="合同配置清单")
+                    detail_found = True
+                else:
+                    # 图片生成失败，回退到表格方式
+                    append_table_to_doc(doc, table_data, title="合同配置清单")
+                    detail_found = True
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+        else:
+            # 使用表格方式插入
+            append_table_to_doc(doc, table_data, title="合同配置清单")
+            detail_found = True
 
     doc.save(output_path)
-    return detail_found
+
+    # 生成PDF
+    pdf_path = None
+    if generate_pdf:
+        pdf_path = convert_to_pdf(output_path)
+
+    return detail_found, pdf_path
 
 
 def sanitize_filename(name: str) -> str:
@@ -661,8 +880,10 @@ def batch_generate_contracts(
     data_dir: Optional[str] = None,
     detail_excel_path: Optional[str] = None,
     header_row: int = 1,
-    detail_start_row: int = 4
-) -> tuple[int, int, list[str]]:
+    detail_start_row: int = 4,
+    use_image: bool = False,
+    generate_pdf: bool = False
+) -> tuple[int, int, int, list[str]]:
     """
     批量生成合同文件
 
@@ -674,9 +895,11 @@ def batch_generate_contracts(
         detail_excel_path: 明细Excel文件路径（多工作表模式）
         header_row: 数据Excel表头所在行号（默认1）
         detail_start_row: 明细数据起始行号（默认4）
+        use_image: 是否使用图片方式插入明细表格
+        generate_pdf: 是否同时生成PDF文件
 
     Returns:
-        (成功数量, 失败数量, 错误信息列表)
+        (成功数量, 失败数量, PDF生成数量, 错误信息列表)
     """
     # 确保输出目录存在
     output_path = Path(output_dir)
@@ -690,32 +913,38 @@ def batch_generate_contracts(
     contracts = read_excel_data(excel_path, header_row=header_row)
 
     if not contracts:
-        return 0, 0, ["Excel文件中没有数据"]
+        return 0, 0, 0, ["Excel文件中没有数据"]
 
     success_count = 0
     fail_count = 0
+    pdf_count = 0
     errors = []
 
     for i, contract in enumerate(contracts, start=1):
         try:
             filename = generate_output_filename(contract)
             output_file = output_path / filename
-            detail_found = generate_contract(
+            detail_found, pdf_path = generate_contract(
                 template_path, contract, str(output_file),
                 data_dir=data_dir,
                 detail_excel_path=detail_excel_path,
-                detail_start_row=detail_start_row
+                detail_start_row=detail_start_row,
+                use_image=use_image,
+                generate_pdf=generate_pdf
             )
             success_count += 1
             detail_info = " (含明细表格)" if detail_found else ""
-            print(f"[{i}/{len(contracts)}] 生成成功: {filename}{detail_info}")
+            pdf_info = " +PDF" if pdf_path else ""
+            if pdf_path:
+                pdf_count += 1
+            print(f"[{i}/{len(contracts)}] 生成成功: {filename}{detail_info}{pdf_info}")
         except Exception as e:
             fail_count += 1
             error_msg = f"第{i}条记录生成失败: {e}"
             errors.append(error_msg)
             print(f"[{i}/{len(contracts)}] {error_msg}")
 
-    return success_count, fail_count, errors
+    return success_count, fail_count, pdf_count, errors
 
 
 def print_environment_info():
@@ -773,6 +1002,16 @@ def main():
         help="明细数据起始行号 (默认: 4)"
     )
     parser.add_argument(
+        "--image",
+        action="store_true",
+        help="使用图片方式插入明细表格（保留Excel样式）"
+    )
+    parser.add_argument(
+        "--pdf",
+        action="store_true",
+        help="同时生成PDF文件（需要安装LibreOffice）"
+    )
+    parser.add_argument(
         "--check", "-c",
         action="store_true",
         help="仅检查环境和依赖，不执行生成"
@@ -804,19 +1043,30 @@ def main():
         print(f"明细文件: {args.detail}")
     print(f"表头行号: {args.header_row}")
     print(f"明细起始行: {args.detail_start_row}")
+    if args.image:
+        print("明细表格: 图片模式")
+    if args.pdf:
+        print("PDF生成: 是")
     print("-" * 50)
 
-    success, fail, errors = batch_generate_contracts(
+    success, fail, pdf_count, errors = batch_generate_contracts(
         args.excel,
         args.template,
         args.output,
         detail_excel_path=args.detail,
         header_row=args.header_row,
-        detail_start_row=args.detail_start_row
+        detail_start_row=args.detail_start_row,
+        use_image=args.image,
+        generate_pdf=args.pdf
     )
 
     print("-" * 50)
-    print(f"生成完成! 成功: {success}, 失败: {fail}")
+    result_msg = f"生成完成! Word: {success}"
+    if args.pdf:
+        result_msg += f", PDF: {pdf_count}"
+    if fail > 0:
+        result_msg += f", 失败: {fail}"
+    print(result_msg)
 
     if errors:
         print("\n错误详情:")
