@@ -407,7 +407,7 @@ def read_excel_table_from_row(excel_path: str, start_row: int = 9,
     return table_data
 
 
-def set_cell_border(cell):
+def set_cell_border(cell, border_color: str = "000000", border_size: str = "4"):
     """为单元格设置边框"""
     tc = cell._tc
     tcPr = tc.get_or_add_tcPr()
@@ -416,10 +416,43 @@ def set_cell_border(cell):
     for border_name in ['top', 'left', 'bottom', 'right']:
         border = OxmlElement(f'w:{border_name}')
         border.set(qn('w:val'), 'single')
-        border.set(qn('w:sz'), '4')
-        border.set(qn('w:color'), '000000')
+        border.set(qn('w:sz'), border_size)
+        border.set(qn('w:color'), border_color)
         tcBorders.append(border)
     tcPr.append(tcBorders)
+
+
+def set_cell_shading(cell, color: str):
+    """设置单元格背景色"""
+    tc = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+    shading = OxmlElement('w:shd')
+    shading.set(qn('w:val'), 'clear')
+    shading.set(qn('w:color'), 'auto')
+    shading.set(qn('w:fill'), color)
+    tcPr.append(shading)
+
+
+def set_cell_vertical_alignment(cell, align: str = "center"):
+    """设置单元格垂直对齐"""
+    tc = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+    vAlign = OxmlElement('w:vAlign')
+    vAlign.set(qn('w:val'), align)
+    tcPr.append(vAlign)
+
+
+def is_number_like(value: str) -> bool:
+    """判断字符串是否像数字（用于右对齐）"""
+    if not value or value.strip() == "":
+        return False
+    # 去除常见的数字格式字符
+    cleaned = value.replace(",", "").replace(" ", "").replace("￥", "").replace("¥", "")
+    try:
+        float(cleaned)
+        return True
+    except ValueError:
+        return False
 
 
 def append_table_to_doc(doc, table_data: list[list[str]], title: str = None):
@@ -431,6 +464,9 @@ def append_table_to_doc(doc, table_data: list[list[str]], title: str = None):
         table_data: 表格数据，二维列表
         title: 可选的表格标题
     """
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+
     if not table_data:
         return
 
@@ -442,28 +478,72 @@ def append_table_to_doc(doc, table_data: list[list[str]], title: str = None):
         title_para = doc.add_paragraph()
         title_run = title_para.add_run(title)
         title_run.bold = True
-        title_run.font.size = Pt(12)
+        title_run.font.size = Pt(14)
+        title_run.font.name = '黑体'
+        title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    # 计算列数（取最大列数）
+    # 计算列数（取最大列数，但限制合理范围）
     max_cols = max(len(row) for row in table_data)
+    # 去除尾部空列
+    while max_cols > 1:
+        all_empty = all(
+            len(row) < max_cols or not row[max_cols - 1].strip()
+            for row in table_data
+        )
+        if all_empty:
+            max_cols -= 1
+        else:
+            break
 
     # 创建表格
     table = doc.add_table(rows=len(table_data), cols=max_cols)
     table.style = 'Table Grid'
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+
+    # 设置表格自动调整
+    table.autofit = True
 
     # 填充数据
     for row_idx, row_data in enumerate(table_data):
         row = table.rows[row_idx]
-        for col_idx, cell_value in enumerate(row_data):
-            if col_idx < max_cols:
-                cell = row.cells[col_idx]
-                cell.text = cell_value
-                # 设置边框
-                set_cell_border(cell)
-                # 设置字体
-                for paragraph in cell.paragraphs:
-                    for run in paragraph.runs:
+        is_header = row_idx == 0  # 第一行是表头
+
+        for col_idx in range(max_cols):
+            cell = row.cells[col_idx]
+            cell_value = row_data[col_idx] if col_idx < len(row_data) else ""
+
+            # 清理单元格内容中的换行符
+            cell_value = cell_value.replace("\n", " ").strip()
+            cell.text = cell_value
+
+            # 设置边框
+            set_cell_border(cell)
+
+            # 设置垂直居中
+            set_cell_vertical_alignment(cell, "center")
+
+            # 设置段落和字体样式
+            for paragraph in cell.paragraphs:
+                # 设置段落对齐
+                if is_header:
+                    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                elif is_number_like(cell_value):
+                    paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                else:
+                    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+                for run in paragraph.runs:
+                    run.font.size = Pt(9)
+                    run.font.name = '宋体'
+                    run._element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
+
+                    if is_header:
+                        run.bold = True
                         run.font.size = Pt(10)
+
+            # 表头行设置背景色
+            if is_header:
+                set_cell_shading(cell, "D9E2F3")  # 浅蓝色背景
 
 
 def generate_contract(template_path: str, data: dict, output_path: str,
