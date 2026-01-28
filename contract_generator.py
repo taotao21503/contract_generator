@@ -418,6 +418,28 @@ def read_excel_table_from_row(excel_path: str, start_row: int = 9,
     return table_data
 
 
+def format_decimal(value: str, decimals: int = 2) -> str:
+    """
+    格式化数字字符串，保留指定小数位
+
+    Args:
+        value: 原始字符串
+        decimals: 小数位数
+
+    Returns:
+        格式化后的字符串
+    """
+    if not value or value.strip() == "":
+        return value
+    # 去除常见格式字符
+    cleaned = value.replace(",", "").replace(" ", "").replace("￥", "").replace("¥", "")
+    try:
+        num = float(cleaned)
+        return f"{num:,.{decimals}f}"
+    except ValueError:
+        return value
+
+
 def table_to_image(table_data: list[list[str]], output_path: str) -> bool:
     """
     将表格数据转换为图片
@@ -445,13 +467,16 @@ def table_to_image(table_data: list[list[str]], output_path: str) -> bool:
             else:
                 break
 
-        # 规范化数据
+        # 规范化数据并格式化F、G、H列（索引5、6、7）的数字
         normalized_data = []
-        for row in table_data:
+        for row_idx, row in enumerate(table_data):
             new_row = []
             for i in range(max_cols):
                 if i < len(row):
                     val = str(row[i]).replace('\n', ' ').strip()
+                    # 对F、G、H列（索引5、6、7）的数据行进行小数格式化
+                    if row_idx > 0 and i in [5, 6, 7]:
+                        val = format_decimal(val, 2)
                 else:
                     val = ''
                 new_row.append(val)
@@ -467,8 +492,18 @@ def table_to_image(table_data: list[list[str]], output_path: str) -> bool:
         # 计算图片尺寸
         n_rows, n_cols = len(data_rows) + 1, len(headers)
         cell_height = 0.4
-        cell_width = 1.5
-        fig_width = max(n_cols * cell_width, 10)
+
+        # 自定义列宽：E列(索引4)窄一些，F、G、H列(索引5、6、7)宽一些
+        col_widths = []
+        for i in range(n_cols):
+            if i == 4:  # E列 - 数量列，窄
+                col_widths.append(0.6)
+            elif i in [5, 6, 7]:  # F、G、H列 - 金额列，宽
+                col_widths.append(1.8)
+            else:
+                col_widths.append(1.2)
+
+        fig_width = max(sum(col_widths), 10)
         fig_height = max(n_rows * cell_height, 2)
 
         # 创建图形
@@ -489,6 +524,14 @@ def table_to_image(table_data: list[list[str]], output_path: str) -> bool:
         table.auto_set_font_size(False)
         table.set_fontsize(9)
         table.scale(1.2, 1.5)
+
+        # 设置列宽
+        for j in range(n_cols):
+            # 相对宽度比例
+            width_ratio = col_widths[j] / sum(col_widths)
+            for i in range(n_rows):
+                cell = table[(i, j)]
+                cell.set_width(width_ratio)
 
         # 设置表头样式
         for j in range(n_cols):
