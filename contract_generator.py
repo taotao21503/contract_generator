@@ -547,33 +547,31 @@ def table_to_image(table_data: list[list[str]], output_path: str) -> bool:
         table.set_fontsize(9)
         table.scale(1.2, 1.5)
 
-        # 设置列宽和对齐
+        # 设置列宽
         for j in range(n_cols):
-            # 相对宽度比例
             width_ratio = col_widths[j] / sum(col_widths)
             for i in range(n_rows):
                 cell = table[(i, j)]
                 cell.set_width(width_ratio)
-                # 表头始终居中，数据行按列设置对齐
-                if i == 0:
-                    cell._loc = 'center'
-                else:
-                    cell._loc = col_aligns[j]
 
         # 设置表头样式
         for j in range(n_cols):
             cell = table[(0, j)]
             cell.set_text_props(weight='bold', fontsize=10)
             cell.set_facecolor('#D9E2F3')
+            cell.get_text().set_ha('center')  # 表头居中
 
-        # 设置数据行样式（交替背景色）
+        # 设置数据行样式
         for i in range(1, n_rows):
             for j in range(n_cols):
                 cell = table[(i, j)]
+                # 交替背景色
                 if i % 2 == 0:
                     cell.set_facecolor('#F5F5F5')
                 else:
                     cell.set_facecolor('#FFFFFF')
+                # 设置对齐方式
+                cell.get_text().set_ha(col_aligns[j])
 
         plt.tight_layout()
         plt.savefig(output_path, dpi=150, bbox_inches='tight',
