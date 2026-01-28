@@ -915,8 +915,7 @@ def sanitize_filename(name: str) -> str:
 
 def generate_output_filename(data: dict,
                              contract_field: str = "合同编号",
-                             customer_field: str = "收货方名称（乙方）",
-                             bu_field: str = "BU") -> str:
+                             customer_field: str = "收货方名称（乙方）") -> str:
     """
     根据合同数据生成输出文件名
 
@@ -924,7 +923,6 @@ def generate_output_filename(data: dict,
         data: 合同数据字典
         contract_field: 合同编号字段名
         customer_field: 客户名称字段名
-        bu_field: BU字段名
 
     Returns:
         输出文件名（不含路径）
@@ -934,10 +932,8 @@ def generate_output_filename(data: dict,
                    data.get("合同号", "").strip() or "未知合同号")
     customer_name = (data.get(customer_field, "").strip() or
                      data.get("客户名称", "").strip() or "未知客户")
-    bu_name = (data.get(bu_field, "").strip() or
-               data.get("BU名称", "").strip() or "未知BU")
 
-    filename = f"{contract_no}-{customer_name}-{bu_name}.docx"
+    filename = f"{contract_no}-{customer_name}.docx"
     return sanitize_filename(filename)
 
 
