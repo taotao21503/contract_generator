@@ -420,7 +420,7 @@ def read_excel_table_from_row(excel_path: str, start_row: int = 9,
 
 def format_decimal(value: str, decimals: int = 2) -> str:
     """
-    格式化数字字符串，保留指定小数位
+    格式化数字字符串，保留指定小数位（使用传统四舍五入）
 
     Args:
         value: 原始字符串
@@ -429,14 +429,20 @@ def format_decimal(value: str, decimals: int = 2) -> str:
     Returns:
         格式化后的字符串
     """
+    from decimal import Decimal, ROUND_HALF_UP
+
     if not value or value.strip() == "":
         return value
     # 去除常见格式字符
     cleaned = value.replace(",", "").replace(" ", "").replace("￥", "").replace("¥", "")
     try:
-        num = float(cleaned)
-        return f"{num:,.{decimals}f}"
-    except ValueError:
+        # 使用 Decimal 实现传统四舍五入
+        d = Decimal(cleaned)
+        quantize_str = '0.' + '0' * decimals  # e.g., '0.00'
+        rounded = d.quantize(Decimal(quantize_str), rounding=ROUND_HALF_UP)
+        # 添加千位分隔符
+        return f"{float(rounded):,.{decimals}f}"
+    except Exception:
         return value
 
 
@@ -493,15 +499,31 @@ def table_to_image(table_data: list[list[str]], output_path: str) -> bool:
         n_rows, n_cols = len(data_rows) + 1, len(headers)
         cell_height = 0.4
 
-        # 自定义列宽：E列(索引4)窄一些，F、G、H列(索引5、6、7)宽一些
+        # 自定义列宽
         col_widths = []
         for i in range(n_cols):
-            if i == 4:  # E列 - 数量列，窄
+            if i == 1:  # B列 - 调宽
+                col_widths.append(2.0)
+            elif i == 4:  # E列 - 数量列，窄
                 col_widths.append(0.6)
-            elif i in [5, 6, 7]:  # F、G、H列 - 金额列，宽
+            elif i == 5:  # F列 - 金额列，宽
+                col_widths.append(1.8)
+            elif i == 6:  # G列 - 调窄
+                col_widths.append(1.2)
+            elif i == 7:  # H列 - 金额列，宽
                 col_widths.append(1.8)
             else:
                 col_widths.append(1.2)
+
+        # 列对齐方式：A、B、C、D左对齐，F、G、H右对齐，其他居中
+        col_aligns = []
+        for i in range(n_cols):
+            if i in [0, 1, 2, 3]:  # A、B、C、D列左对齐
+                col_aligns.append('left')
+            elif i in [5, 6, 7]:  # F、G、H列右对齐
+                col_aligns.append('right')
+            else:
+                col_aligns.append('center')
 
         fig_width = max(sum(col_widths), 10)
         fig_height = max(n_rows * cell_height, 2)
@@ -525,13 +547,18 @@ def table_to_image(table_data: list[list[str]], output_path: str) -> bool:
         table.set_fontsize(9)
         table.scale(1.2, 1.5)
 
-        # 设置列宽
+        # 设置列宽和对齐
         for j in range(n_cols):
             # 相对宽度比例
             width_ratio = col_widths[j] / sum(col_widths)
             for i in range(n_rows):
                 cell = table[(i, j)]
                 cell.set_width(width_ratio)
+                # 表头始终居中，数据行按列设置对齐
+                if i == 0:
+                    cell._loc = 'center'
+                else:
+                    cell._loc = col_aligns[j]
 
         # 设置表头样式
         for j in range(n_cols):
