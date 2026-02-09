@@ -19,6 +19,9 @@ ENV/
 Thumbs.db
 
 # Project specific
-output/*.docx
+output/
 data/*.xlsx
 data/*.docx
+签收单/
+test data/
+*.pptx

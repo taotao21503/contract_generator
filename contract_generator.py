@@ -584,6 +584,150 @@ def table_to_image(table_data: list[list[str]], output_path: str) -> bool:
         return False
 
 
+def find_placeholder_paragraph(doc, placeholder: str):
+    """
+    查找包含占位符的段落
+
+    Args:
+        doc: Word文档对象
+        placeholder: 要查找的占位符文本
+
+    Returns:
+        (段落对象, 段落索引) 或 (None, -1)
+    """
+    for i, paragraph in enumerate(doc.paragraphs):
+        if placeholder in paragraph.text:
+            return paragraph, i
+    return None, -1
+
+
+def insert_image_at_placeholder(doc, placeholder: str, image_path: str, width_inches: float = 6.0):
+    """
+    在指定占位符位置插入图片
+
+    Args:
+        doc: Word文档对象
+        placeholder: 占位符文本（如 "~~产品明细~~"）
+        image_path: 图片文件路径
+        width_inches: 图片宽度（英寸）
+
+    Returns:
+        是否成功插入
+    """
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    paragraph, idx = find_placeholder_paragraph(doc, placeholder)
+    if paragraph is None:
+        print(f"    警告: 未找到占位符 '{placeholder}'，将追加到文档末尾")
+        # 回退到追加模式
+        para = doc.add_paragraph()
+        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = para.add_run()
+        run.add_picture(image_path, width=Inches(width_inches))
+        return True
+
+    # 清空原段落内容，保留段落格式
+    paragraph.clear()
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # 在该段落插入图片
+    run = paragraph.add_run()
+    run.add_picture(image_path, width=Inches(width_inches))
+
+    return True
+
+
+def insert_table_at_placeholder(doc, placeholder: str, table_data: list[list[str]]):
+    """
+    在指定占位符位置插入表格
+
+    Args:
+        doc: Word文档对象
+        placeholder: 占位符文本
+        table_data: 表格数据
+
+    Returns:
+        是否成功插入
+    """
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+
+    paragraph, idx = find_placeholder_paragraph(doc, placeholder)
+    if paragraph is None:
+        print(f"    警告: 未找到占位符 '{placeholder}'，将追加到文档末尾")
+        append_table_to_doc(doc, table_data)
+        return True
+
+    if not table_data:
+        return False
+
+    # 计算列数
+    max_cols = max(len(row) for row in table_data)
+    while max_cols > 1:
+        all_empty = all(
+            len(row) < max_cols or not row[max_cols - 1].strip()
+            for row in table_data
+        )
+        if all_empty:
+            max_cols -= 1
+        else:
+            break
+
+    # 获取段落的父元素和位置
+    p_element = paragraph._element
+    parent = p_element.getparent()
+    p_index = list(parent).index(p_element)
+
+    # 创建新表格
+    table = doc.add_table(rows=len(table_data), cols=max_cols)
+    table.style = 'Table Grid'
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = True
+
+    # 填充数据
+    for row_idx, row_data in enumerate(table_data):
+        row = table.rows[row_idx]
+        is_header = row_idx == 0
+
+        for col_idx in range(max_cols):
+            cell = row.cells[col_idx]
+            cell_value = row_data[col_idx] if col_idx < len(row_data) else ""
+            cell_value = cell_value.replace("\n", " ").strip()
+            cell.text = cell_value
+
+            set_cell_border(cell)
+            set_cell_vertical_alignment(cell, "center")
+
+            for para in cell.paragraphs:
+                if is_header:
+                    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                elif is_number_like(cell_value):
+                    para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                else:
+                    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+                for run in para.runs:
+                    run.font.size = Pt(9)
+                    run.font.name = '宋体'
+                    run._element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
+                    if is_header:
+                        run.bold = True
+                        run.font.size = Pt(10)
+
+            if is_header:
+                set_cell_shading(cell, "D9E2F3")
+
+    # 将表格移动到占位符位置
+    tbl_element = table._tbl
+    parent.remove(tbl_element)
+    parent.insert(p_index, tbl_element)
+
+    # 删除原占位符段落
+    parent.remove(p_element)
+
+    return True
+
+
 def append_image_to_doc(doc, image_path: str, title: str = None):
     """
     将图片追加到Word文档末尾
@@ -811,7 +955,8 @@ def generate_contract(template_path: str, data: dict, output_path: str,
                       detail_excel_path: Optional[str] = None,
                       detail_start_row: int = 4,
                       use_image: bool = False,
-                      generate_pdf: bool = False):
+                      generate_pdf: bool = False,
+                      detail_placeholder: Optional[str] = None):
     """
     根据模板生成单个合同文件
 
@@ -824,6 +969,7 @@ def generate_contract(template_path: str, data: dict, output_path: str,
         detail_start_row: 明细数据起始行号（默认4）
         use_image: 是否使用图片方式插入明细表格
         generate_pdf: 是否同时生成PDF文件
+        detail_placeholder: 明细表格插入位置的占位符（如 "~~产品明细~~"），None则追加到末尾
     """
     doc = Document(template_path)
 
@@ -850,7 +996,7 @@ def generate_contract(template_path: str, data: dict, output_path: str,
             for table in section.footer.tables:
                 replace_placeholders_in_table(table, data)
 
-    # 查找并追加明细表格
+    # 查找并插入明细表格
     detail_found = False
     table_data = None
 
@@ -874,19 +1020,37 @@ def generate_contract(template_path: str, data: dict, output_path: str,
                 tmp_path = tmp.name
             try:
                 if table_to_image(table_data, tmp_path):
-                    append_image_to_doc(doc, tmp_path, title="合同配置清单")
+                    if detail_placeholder:
+                        # 在占位符位置插入图片
+                        insert_image_at_placeholder(doc, detail_placeholder, tmp_path, width_inches=6.0)
+                    else:
+                        # 追加到文档末尾
+                        append_image_to_doc(doc, tmp_path, title="合同配置清单")
                     detail_found = True
                 else:
                     # 图片生成失败，回退到表格方式
-                    append_table_to_doc(doc, table_data, title="合同配置清单")
+                    if detail_placeholder:
+                        insert_table_at_placeholder(doc, detail_placeholder, table_data)
+                    else:
+                        append_table_to_doc(doc, table_data, title="合同配置清单")
                     detail_found = True
             finally:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
         else:
             # 使用表格方式插入
-            append_table_to_doc(doc, table_data, title="合同配置清单")
+            if detail_placeholder:
+                insert_table_at_placeholder(doc, detail_placeholder, table_data)
+            else:
+                append_table_to_doc(doc, table_data, title="合同配置清单")
             detail_found = True
+    else:
+        # 没有明细数据时，删除占位符
+        if detail_placeholder:
+            paragraph, _ = find_placeholder_paragraph(doc, detail_placeholder)
+            if paragraph:
+                paragraph.clear()
+                paragraph.add_run("（无产品明细）")
 
     doc.save(output_path)
 
@@ -946,7 +1110,8 @@ def batch_generate_contracts(
     header_row: int = 1,
     detail_start_row: int = 4,
     use_image: bool = False,
-    generate_pdf: bool = False
+    generate_pdf: bool = False,
+    detail_placeholder: Optional[str] = None
 ) -> tuple[int, int, int, list[str]]:
     """
     批量生成合同文件
@@ -961,6 +1126,7 @@ def batch_generate_contracts(
         detail_start_row: 明细数据起始行号（默认4）
         use_image: 是否使用图片方式插入明细表格
         generate_pdf: 是否同时生成PDF文件
+        detail_placeholder: 明细表格插入位置的占位符
 
     Returns:
         (成功数量, 失败数量, PDF生成数量, 错误信息列表)
@@ -994,7 +1160,8 @@ def batch_generate_contracts(
                 detail_excel_path=detail_excel_path,
                 detail_start_row=detail_start_row,
                 use_image=use_image,
-                generate_pdf=generate_pdf
+                generate_pdf=generate_pdf,
+                detail_placeholder=detail_placeholder
             )
             success_count += 1
             detail_info = " (含明细表格)" if detail_found else ""
@@ -1076,6 +1243,11 @@ def main():
         help="同时生成PDF文件（需要安装LibreOffice）"
     )
     parser.add_argument(
+        "--placeholder", "-p",
+        default=None,
+        help="明细表格插入位置的占位符文本（如 '~~产品明细~~'），不指定则追加到末尾"
+    )
+    parser.add_argument(
         "--check", "-c",
         action="store_true",
         help="仅检查环境和依赖，不执行生成"
@@ -1109,6 +1281,8 @@ def main():
     print(f"明细起始行: {args.detail_start_row}")
     if args.image:
         print("明细表格: 图片模式")
+    if args.placeholder:
+        print(f"插入位置: {args.placeholder}")
     if args.pdf:
         print("PDF生成: 是")
     print("-" * 50)
@@ -1121,7 +1295,8 @@ def main():
         header_row=args.header_row,
         detail_start_row=args.detail_start_row,
         use_image=args.image,
-        generate_pdf=args.pdf
+        generate_pdf=args.pdf,
+        detail_placeholder=args.placeholder
     )
 
     print("-" * 50)
